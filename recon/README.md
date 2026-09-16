@@ -5,7 +5,30 @@
 
 ## 分析对象与本地大文件（不随仓库分发）
 
-- 目标二进制：`pip download ninecli --no-deps` 解压 whl 后得 `ninecli/bin/ninecli`（8.9MB ELF）。
+### 分析对象：ninecli 0.1.7 二进制（对照验证请认准校验和）
+
+本项目全部分析针对 **ninecli v0.1.7** 的 `manylinux_2_17_x86_64` wheel（MIT 许可），
+获取方式（任选其一）：
+
+```bash
+pip download ninecli==0.1.7 --no-deps --platform manylinux_2_17_x86_64 --only-binary :all:
+# 或 pip install ninecli==0.1.7，二进制在 site-packages/ninecli/bin/ninecli
+```
+
+校验和（本仓库所有 docs 中的地址/偏移均基于此文件）：
+
+```
+ninecli-0.1.7-py3-none-manylinux_2_17_x86_64.whl
+  SHA256 = ff3941b81d60e4bba60e9477900e63a9ebd2b02e74cb4b8138f3cfe1d94a81cc
+解压后 ninecli/bin/ninecli（8.9MB 静态 ELF，Go 1.x）
+  SHA256 = faaa5b841427e8d3018321e6ae7db9b26921600b2ef4c8bafd48640edaac0126
+```
+
+若 PyPI 下架，本仓库 Releases 页附有原样 wheel 存档。注意 PyPI 还有 macOS/Windows/aarch64 等
+其他平台的 wheel，**各平台二进制不同，地址偏移不可混用**；本文档结论只适用于 Linux x86_64 版。
+
+### 其他本地大文件
+
 - 九号官方 APK（`ninebot_xiaomi.bin`，258MB，梆梆加固）：小米应用商店直链，见九号官网下载页。
 - 再生成两个大产物：
   - `gore_out.json`（GoReSym 符号表，82MB）：`./GoReSym -t -d -p <ninecli二进制> > gore_out.json`
