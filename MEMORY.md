@@ -1,0 +1,70 @@
+# MEMORY.md
+
+## 项目：九号出行历史行程导出 + 速度可视化
+
+- 目标：拉取用户九号电动车（九号出行 App）历史行程与详情，计算 App 隐藏的最高速/平均速，网页展示。
+- 现状（2026-08-07 第一轮完成）：
+  - APK `cn.ninebot.ninebot`（v6.x，小米商店官方直链 258MB）被梆梆全量加固，jadx 仅 31 个桩类，静态反编译不可行。
+  - 云 API 已静态恢复（见 `docs/api-recon.md`）：Passport `api-passport-bj.ninebot.com`、业务 `api-jhcx-v6-bj.ninebot.com`、行程 `cn-cbu-gateway.ninebot.com`、控制 `ebike.ninebot.com`、电机 `steeldust.ninebot.com`；网易加密层（AES+PKCS7+checkcode+GenKeyData）由 ninecli 完整重实现。
+  - 工具链：ninecli 0.1.7（PyPI/MIT，二进制在 `ninecli_wheel/ninecli/bin/ninecli`，本机验证可运行；`serve` 明文 REST :18009）。
+  - 交付物：`fetch_trips.py`（抓取+算速+缓存）、`index.html`（看板，Leaflet CDN 离线降级）、`README.md`。当前 `trips.json` 是 120 条示例数据（demo 标记）。
+  - 行程列表即含最高速字段（分组格式串 `max %.1fkm/h` 证实）；平均速 = 里程/时长。
+- 待办：用户决定登录方式（密码 or 短信验证码）→ 跑 `fetch_trips.py` → 用真实数据覆盖 trips.json。风险提示过：登录可能顶掉手机端会话。
+- 环境备忘：无 root；Go 1.26.5 装在 `/data/dl/ninebot/go/`；GoReSym 在 `/data/dl/ninebot/GoReSym`；有 KVM（/dev/kvm）可跑模拟器做动态脱壳（未用上）。
+- 2026-08-07 第三轮（capstone 反汇编级确认接口路径，用户确认不要控制命令）：
+  - 行程列表 `POST /app-api/travel/v6/travel-list2`（带 2！Business.Travel @0x6d3011，lea→0x8e6672，len 31，r9d=6；初版误记 travel-list，第七轮动态抓包已实锤纠正）
+  - 行程详情 `POST /app-api/travel/v6/travel-info`（Business.TravelDetail @0x6d383a，lea→0x8e5b61，len 30，r9d=5；方法为 POST，初版误记 GET）
+  - 车辆列表 `/vehicle/binding/my-vehicle`（Business.Vehicles @0x6d3f53，lea→0x8e389e）
+  - 电池 `/v6/vehicle/battery-info`（字符串池）
+  - 控制命令存在（`POST /vehicles/{sn}/engine/start|stop`、open_buck、bell，ebike 域）但按用户要求未细挖
+  - 注意：`GET /vehicles/{sn}/travel/{detail_id}` 是 ninecli serve 本地 REST 路由，不是九号 API
+  - VA→文件偏移换算：.rodata VA 0x7ee000 ↔ 文件 0x3ee000；.text VA 0x401000 ↔ 文件 0x1000
+  - 工具：capstone 反汇编 + GoReSym 符号表（gore_out.json）
+- 2026-08-07 第四轮（**加密层公式级还原，unicorn 动态验证**，交付 `ninebot_crypto.py`）：
+  - **DeriveKey 公式已抠完并用 unicorn 执行二进制机器码验证（11 组 ALL PASS）**：4 输入各做 ROL8 累加 → x=A^C, y=B^D → fx=rol(x,8)^x^rol(x,24), gy=rol(y,8)^y^rol(y,24) → a'=A^gy, b'=B^fx, c'=C^gy, d'=D^fx → out3=(c'&b')^a'; out2=out3^~(c'^d'^((c'|d')^b')); out1=(tmp|out3)^((c'|d')^b'); out0=(~((c'|d')^b')&out2)^d' → 4 dword 小端 16 字节。测试向量: derive_key(b"abcdefghijklm",b"0123456789ab",b"XYZ",b"ninebot!")=82ffe6a8cbb9a4ffdbf791a74e37176e
+  - **AndroidB64 unicorn 验证（9 组 ALL PASS）**：标准 base64 + 每 76 字符插 \n + 非空时末尾恒 \n（非 Android 原版行为，是 ninecli 自己的实现）
+  - **两把独立密钥**：请求 AES key = GenKReq()（16 字节，94 可打印 ASCII 字符集）；响应解密 key = DeriveKey(kd1..kd4)；kd1..4 = GenKeyData() = randHex(11),randHex(11),randHex(10),randFromCharset(8,69字符集,拒绝采样)
+  - **AES-128-CBC，IV = 16 个零字节，PKCS7**（修正此前"随机 IV"的猜测）；h = md5hex(明文 wrapper)（0x5d1780 的 MD5 初始常量实锤）；明文 wrapper 字段顺序: data(AndroidB64+json转义), keyDataFour, keyDataOne, keyDataThree, keyDataTwo, platform(10), timeStamp(ms)
+  - wire 层 D/H/K/P/T 结构体 json tag 从类型元数据恢复；p="101" t="0"
+  - 交付：`ninebot_crypto.py`（纯 Python，自检 round-trip 通过）、`verify_derivekey.py`、`verify_androidb64.py`、`verify_buildwrapper.py`
+  - 遗留：platform 值默认 10（调用方传入，未 100% 反汇编确认）；真实服务器兼容性待登录实测
+  - 行程列表 `POST /app-api/travel/v6/travel-list2`（带 2！Business.Travel @0x6d3011，lea→0x8e6672，len 31，r9d=6；初版误记 travel-list，第七轮动态抓包已实锤纠正）
+  - 行程详情 `POST /app-api/travel/v6/travel-info`（Business.TravelDetail @0x6d383a，lea→0x8e5b61，len 30，r9d=5；方法为 POST，初版误记 GET）
+  - 车辆列表 `/vehicle/binding/my-vehicle`（Business.Vehicles @0x6d3f53，lea→0x8e389e）
+  - 电池 `/v6/vehicle/battery-info`（字符串池）
+  - 控制命令存在（`POST /vehicles/{sn}/engine/start|stop`、open_buck、bell，ebike 域）但按用户要求未细挖
+  - 注意：`GET /vehicles/{sn}/travel/{detail_id}` 是 ninecli serve 本地 REST 路由，不是九号 API
+  - VA→文件偏移换算：.rodata VA 0x7ee000 ↔ 文件 0x3ee000；.text VA 0x401000 ↔ 文件 0x1000
+  - 工具：capstone 反汇编 + GoReSym 符号表（gore_out.json）
+- 2026-08-07 第二轮：对 ninecli 二进制做了完整安全审计 + 算法逆向（成果见 `docs/security-audit.md` 和 `docs/api-recon.md` §5）：
+  - **结论：未发现恶意代码**。无 os/exec、无 plugin 动态加载、无第三方端点（仅 5 个九号官方域名）、strace 动态验证无异常外连、凭据只发往 Passport 端点。
+  - **Passport 签名已破解并端到端验证**：`Sign = sha256(排序后 k=v&k=v 拼接)`，含硬编码 `clientKey=e177176a-3b3e-1513-e26e-d1123034cb66`，字段含 app_version/areaCode/device/os/os_language/os_version/password/timestamp/url/username。
+  - **网易加密层已还原**：请求 wrapper `{"d":AES-128-CBC密文b64,"h":md5hex,"k":RSA-1024(AES密钥)b64,"p":"101","t":"0"}`；响应 `{"r":b64}` 经 DeriveKey(4分量 ROL8+XOR) 派生 AES 密钥解密。RSA 公钥已提取。
+  - 接口确认：`POST /v6/user/login`（passport）、`POST /user/user/login`（business_login，api-jhcx-v6 域名）。请求头 16 个（okhttp/4.9.1 UA、Need_decrypt:1 等）。
+  - 分析工具链：`disasm_func.py`/`disasm_func2.py`（objdump+字符串交叉引用）、GDB 断点取证、假服务器 `fake_passport.py`/`fake_passport2.py`（审计用，可复用）。
+  - 后续如要"不依赖 CLI 的纯 Python 实现"，需复刻：passport_sign（已完整）、EncryptRequest（AES-CBC+PKCS7+RSA-1024+MD5 wrapper，已完整）、DeriveKey（ROL8/XOR 混合公式，反汇编可见但需细抠）、DecryptResponse。
+- 2026-08-07 第五轮（**动态抓包级还原，纯 Python 客户端交付**，`ninebot_api.py` + 改造 `fetch_trips.py`）：
+  - **RSA 密钥纠正**：二进制两把公钥，N1(`d3de6d1c...`, DER @0xc2e020, crypto.init.0→0xc87c00→EncryptRequest) 是真实使用的；N2(PEM @0xc2fae5, `ba99a158...`) 是死数据（无引用）。ninebot_crypto.py 已换 N1。
+  - **路径纠正**（动态抓包）：行程列表 `/app-api/travel/v6/travel-list2`（带 2！）、详情 `/app-api/travel/v6/travel-info` 均为 **POST**；车辆列表 `/vehicle/binding/my-vehicle` 主机 = **ebike.ninebot.com**（business_line: ebike→ebike / motor→steeldust）。
+  - **内层 JSON = Go struct 字段序（非 map 排序）**，GDB 抓 446B(login)/383B(vehicles)/485B(travel) 三例字节级复现；checkcode = MD5(无 checkcode 紧凑 JSON).upper() 追加末尾。
+  - wrapper：business 域统一 platform=2 + timeStamp=**秒**；响应 wire 层 `{"r": b64}`，业务 code/data 在内层；Business 方法返回内层 data。
+  - 请求头：login Business-Type:0；vehicles/travel Business-Type:2 + Access_token/Accept/Rn-Module:Track/Rn-Ver:743/Rn-Version:0。
+  - 认证：passport access_token（Access_token 头 + 内层）+ business_uid（内层 uid 字段，来自 business login 响应 data.uid）。
+  - 验证：build_inner/build_wrapper 与 GDB 抓包逐字节一致；ninecli vs ninebot_api 差分对比（字段序/公共参数/wrapper platform 全一致）；`ninebot_api.py --self-test` 无账号全链路自测通过。
+  - 交付：`ninebot_api.py`（passport 登录/刷新、business 登录、vehicles、travel-list/info、--self-test）、`ninebot_crypto.py`（N1 密钥 + gen_nonce + build_inner）、`fetch_trips.py`（零 ninecli 依赖）、`gdb_capture_all.gdb`、`disasm_func4.py`。
+  - 待办：用户真实账号跑 `python3 ninebot_api.py login` + `fetch_trips.py` 实测真实服务器（响应解密链路已用真实 kd 验证，未对真实服务器端到端验证）。
+- 2026-08-07 第六轮（**反编译逐句对照**，`docs/crypto-vs-disasm.md`）：
+  - 用 objdump/capstone 反汇编 crypto/api 包全部 18 个函数（`dump_crypto_funcs.py` → `dump_crypto.txt`）+ GDB 动态抓寄存器，与 ninebot_crypto.py 逐句核对：**17/18 一致**。
+  - 新确认细节：EncryptRequest 的 P='101'/T='0' 来自 0x998070 静态模板（80B memmove 初始化返回结构体，GDB 实锤）；wrapper timeStamp=Unix 秒（0x6cf423 movabs -62135596800 偏移），内层 serviceTime=毫秒（imul $0x3e8）；ComputeCheckcode = MD5 小写 hex → ToUpper（GDB 抓到小写 hex）；AESEncrypt 内部直接 b64；BuildWrapper 全部 11 个字面量逐字节确认（`{\n` / `\t"data" : ` / 字段序 data→kd4→kd1→kd3→kd2→platform→timeStamp / `\n}\n`）。
+  - **修复 1 处差异**：`_go_json_dumps` 原来按 Go encoding/json 默认做了 `<>&`→`\u003c` 等 HTML escape + U+2028/2029 转义；二进制 writeJSONValue @0x6cc0a0 字符串分支只转义 `\n \t \r " \` 五个字符，其余（含控制字符/非 ASCII）原样。已改为自定义编码器精确模拟，GDB 抓包 446B 主体 + 493B 完整内层逐字节复现，特殊字符测试通过。
+  - 遗留问题答复：`gdb_all_cmds.gdb` 仍可运行（GDB 19:44 实测 CC_INPUT 446B / AES key+plain / WRAPPER 862B 全部命中）。
+  - 已知理论差异（无实际影响）：float 格式二进制用 strconv 'f'、Python 用 repr；业务参数无 float。
+- 2026-08-07 第七轮（**假服务器+加密响应打通 travel-list2**，`fake_server4.py`）：
+  - 之前遗留问题解答：business/travel 明文从来不是假服务器解密看的，而是 **GDB 在 AES 入口 0x6ccac0 断点抓 wrapper 明文**（`/tmp/aes_plain_N.bin`，含 kd1..4 + AndroidB64 内层 JSON）。
+  - **响应链路修正（重要）**：DecryptResponse 解密出的明文是 **wrapper JSON**（`{"data": AndroidB64(业务JSON), "platform":2, "timeStamp":秒}`），不是裸业务 JSON。二进制解密后 unescapeJSONString 取 data → AndroidB64 decode。ninebot_crypto.py 新增 `unwrap_response()`，`decrypt_wire_response` 已改为 wrapper 解包（错误串 "missing 'data' field in wrapper" 实锤）。
+  - **travel-list 路径实锤 = `/app-api/travel/v6/travel-list2`**（带 2；fake4.log 记录真实请求路径）。ninebot_api.py PATH_TRAVEL_LIST 已确认是 travel-list2。
+  - **行程列表真实字段名/类型**（printTravelGroups.func1 @0x796ae0 反汇编 + fake4 试错确认）：`travel_id`(str)、`end_time_format`(str "2026-08-01 08:30:00"，二进制取 [11:16] 显示 HH:MM)、`mileages`(str→ParseFloat)、`duration`(数字)、`speed`(str→ParseFloat，**最高速字段名是 speed 不是 max_speed**)、`used_electricity`(str→ParseFloat)。汇总：mileages 和、duration 和、speed 最大、used_electricity 和。fetch_trips.py KEY_* 已补 `end_time_format`/`speed`。
+  - **vehicles 请求 vehicle_type=64**（GDB 抓包实测；Python 默认 65 已改 64）；travel 请求 rnVersion=743、vehicle_type=112（0x8d7b06 '743112' 硬编码）。
+  - fake_server4.py：收到加密请求 → 读 GDB 最新 wrapper 提取 kd → Python 复算 DeriveKey 构造合法加密响应（wrapper 明文），二进制可正常解密 → 完整跑通 login→refresh→vehicles→travel-list2（输出 `08/01 1 rides 12.5km 1800s max 45.2km/h 8% used`）。注意：fake4 依赖 GDB 抓 kd，纯 Python 客户端无 GDB 时无法配合（响应仍须真服务器/RSA 私钥）。
+  - 遗留：travel-info（详情）响应结构未验证（printTravelDetail @0x7960a0 未挖）；真实服务器端到端未测。
+- 用户偏好：优先静态/不动手机登录态；中文交流；关注第三方代码安全性（来源不明要审计）。

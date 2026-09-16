@@ -1,0 +1,35 @@
+# ---- 本地大型工具/原料（获取方式见 README 与 recon/README.md）----
+# 九号官方 APK（小米商店直链）
+/ninebot_xiaomi.bin
+# Go 1.26.5 工具链与 GoReSym
+/go/
+/GoReSym
+# jadx 反编译器
+/bin/
+/lib/
+# jadx 输出（resources + 空 sources，加固证据）
+/src/
+# APK 内提取的 native 库 / assets
+/native/
+/assets_x/
+# hasscc/ninebot HA 集成克隆（字段交叉验证参考）
+/ninebot/
+# ninecli 0.1.7 二进制（分析对象，PyPI 可得）
+/ninecli_wheel/
+/ninecli.whl
+# 九号官网下载页存档
+/cn.html
+# 大型反汇编产物（可再生成，见 recon/README.md）
+/dis.txt
+/gore_out.json
+
+# ---- 真实抓取后的个人数据，勿公开 ----
+/cache/
+/trips.csv
+/tokens.json
+/config.json
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
